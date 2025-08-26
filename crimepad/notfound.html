@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Visionations Case Link Parser</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    body { margin: 2rem; }
+    h1 { font-size: 1.25rem; margin-bottom: .5rem; }
+    textarea {
+      width: 100%; min-height: 220px; box-sizing: border-box; padding: .75rem;
+      border: 1px solid #ccd; border-radius: .5rem; resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: .9rem; line-height: 1.4;
+    }
+    .row { display: flex; align-items: center; gap: .5rem; margin: .75rem 0 1rem; }
+    button {
+      padding: .6rem 1rem; border-radius: .5rem; border: 1px solid #333; background: #111; color: #fff; cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .hint { color: #555; font-size: .9rem; }
+    .error { color: #a40000; background: #ffecec; border: 1px solid #f5bcbc; padding: .5rem .75rem; border-radius: .5rem; }
+    .ok { color: #0a5; }
+    .links { display: grid; gap: .4rem; margin-top: .75rem; }
+    a { word-break: break-all; }
+    .muted { color: #666; }
+    .small { font-size: .85rem; }
+    .pill { display: inline-block; padding: .15rem .5rem; border-radius: 999px; background: #eef; color: #334; border: 1px solid #cde; margin-left: .35rem; }
+  </style>
+</head>
+<body>
+  <h1>Visionations JSON → Case Link</h1>
+  <p class="hint small">
+    Paste the entire error block (including lines above the JSON). Then click <strong>Parse</strong>.
+  </p>
+
+  <textarea id="pasteInput" placeholder="Paste here..."></textarea>
+
+  <div class="row">
+    <button id="parseBtn" type="button">Parse</button>
+    <span id="status" class="muted small" aria-live="polite"></span>
+  </div>
+
+  <div id="result"></div>
+
+  <script>
+    (function () {
+      const input = document.getElementById('pasteInput');
+      const parseBtn = document.getElementById('parseBtn');
+      const status = document.getElementById('status');
+      const result = document.getElementById('result');
+
+      const BASE = "https://app.visionations.com/#";
+
+      // simple UUIDv4-ish validator (accepts lowercase/uppercase)
+      const uuidRe = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b/;
+
+      function setStatus(msg, ok=false) {
+        status.textContent = msg || '';
+        status.className = ok ? 'ok small' : 'muted small';
+      }
+
+      function showError(msg) {
+        result.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+        setStatus('', false);
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function ensureArray(x) {
+        if (Array.isArray(x)) return x;
+        if (x == null) return [];
+        return [x];
+      }
+
+      function parseLastJsonBlob(text) {
+        // Grab the last {...} block in the text, assuming the JSON is at the end.
+        const match = text.match(/{[\s\S]*}$/);
+        if (!match) throw new Error("Could not find a JSON object at the end of the pasted text.");
+        try {
+          return JSON.parse(match[0]);
+        } catch (e) {
+          // Sometimes there can be trailing characters after the JSON — try trimming whitespace and retry once.
+          const trimmed = match[0].trim();
+          return JSON.parse(trimmed);
+        }
+      }
+
+      function buildLinksFromQuery(query) {
+        // Expecting: query = { status: "Active", type: {"$in":["Case"]}, id: {"$in":["uuid", ...]} }
+        const typeRaw =
+          (query?.type && Array.isArray(query.type.$in) && query.type.$in[0]) ||
+          (typeof query?.type === 'string' ? query.type : null);
+
+        if (!typeRaw) throw new Error('Could not determine "query.type".');
+
+        // Map "Case" -> "case" (route segment). If other types appear later, adjust mapping here.
+        const typeSegment = String(typeRaw).trim().toLowerCase();
+
+        let ids =
+          (query?.id && Array.isArray(query.id.$in) && query.id.$in) ||
+          (query?.id && typeof query.id === 'string' ? [query.id] : []);
+
+        ids = ids.filter(x => typeof x === 'string' && uuidRe.test(x));
+
+        if (ids.length === 0) {
+          throw new Error('No valid UUIDs found in "query.id.$in".');
+        }
+
+        return ids.map(id => ({
+          id,
+          href: `${BASE}/${typeSegment}/${id}`
+        }));
+      }
+
+      function handleParse() {
+        result.innerHTML = '';
+        setStatus('Parsing…');
+
+        const text = input.value;
+        if (!text || !text.trim()) {
+          showError('Please paste the error + JSON block first.');
+          return;
+        }
+
+        try {
+          const json = parseLastJsonBlob(text);
+
+          // dig into data.request.query (per the example)
+          const query = json?.data?.request?.query || json?.request?.query || json?.query;
+          if (!query) throw new Error('Could not find "query" inside the JSON (e.g., data.request.query).');
+
+          const links = buildLinksFromQuery(query);
+
+          // Render
+          const typeLabel =
+            (Array.isArray(query.type?.$in) ? query.type.$in[0] : query.type) || 'Case';
+
+          const header = `
+            <div>
+              <div class="small muted">Detected type:
+                <span class="pill">${escapeHtml(String(typeLabel))}</span>
+              </div>
+              <div class="small muted">IDs found: <strong>${links.length}</strong></div>
+            </div>
+          `;
+
+          const list = links
+            .map(l => `<div><a href="${l.href}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.href)}</a></div>`)
+            .join('');
+
+          result.innerHTML = header + `<div class="links">${list}</div>`;
+          setStatus('Done ✓', true);
+        } catch (err) {
+          showError(err.message || String(err));
+        }
+      }
+
+      parseBtn.addEventListener('click', handleParse);
+
+      // Optional: auto-parse right after a paste if user pastes then pauses.
+      input.addEventListener('paste', () => {
+        setStatus('Pasted. Click Parse when ready.', false);
+      });
+    })();
+  </script>
+</body>
+</html>
